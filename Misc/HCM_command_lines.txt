@@ -1,0 +1,150 @@
+#####################################################################################################
+# Command lines and versions used for benchmarking the various correction methods
+# (1) Commands for running correction methods
+# (2) Commands for running aligners
+# Date: May-July 2019
+#####################################################################################################
+
+########################################################################
+# (1) Commands for running correction methods
+########################################################################
+#Input data and common parameters
+
+LR="LR" #path to the long read data set
+
+SR1="SR_R1" #path to the short read data set (mate 1)
+SR2="SR_R2" #path to the short read data set (mate 2)
+
+outfile="out" 
+
+sample="NameOfTheCorrespondingSample"
+
+nthreads=15
+
+########################################################################
+
+#----------------------------------------------------------------------#
+# ColoRMap (last version, commited on 6 Mar 2018)
+# https://github.com/sfu-compbio/colormap
+
+cat $SR1 $SR2 > $SR
+bash colormap/runCorr.sh $LR $SR $output $sample $nthreads
+
+#----------------------------------------------------------------------#
+
+#----------------------------------------------------------------------#
+# FMLRC (last version, commited on 13 Feb 2019)
+# https://github.com/holtjma/fmlrc
+
+mkdir fmlrc
+
+awk 'NR % 4 == 2' $SR | sort | gzip > reads.sorted.txt.gz
+/usr/bin/time -v gunzip -c reads.sorted.txt.gz | tr NT TN | ropebwt2 -LR | tr NT TN | fmlrc/fmlrc-convert fmlrc/comp_msbwt.npy
+
+fmlrc -p $nthreads fmlrc/comp_msbwt.npy $LR $outfile
+
+#----------------------------------------------------------------------#
+
+#----------------------------------------------------------------------#
+# Jabba (last version, commited on 20 Jun 2018)
+# https://github.com/biointec/jabba
+
+cat $SR1 $SR2 > $SR
+
+mkdir brownie_data
+brownie graphCorrection -p brownie_data -k 31 $SR
+
+Jabba --dbgk 31 -t $nthreads --graph brownie_data/DBGraph.fasta -fasta $SR
+
+#----------------------------------------------------------------------#
+# Hercules (last version, commited on 15 Aug 2018)
+# https://github.com/BilkentCompGen/hercules
+
+mkdir preprocessing
+bin/hercules -1 -li $LR -si $SR1 -si $SR2  -o preprocessing
+
+mkdir preprocessing/bowtie
+bash utils/runBowtieRmDup.sh $compressedLR $compressedSR preprocessing/bowtie $nthreads
+
+bin/hercules -2 -li $LR -ai alignment.bam -si preprocessing/short.fasta -t $nthreads -o $outfile
+
+#----------------------------------------------------------------------#
+
+#----------------------------------------------------------------------#
+# LSC (version 2.0)
+# http://augroup.org/LSC/LSC
+
+python LSC-2.0/bin/runLSC.py --long_reads $LR \
+                             --short_reads $SR1 $S2 --short_read_file_type fa \
+                              -o $output --aligner bowtie2 \
+                             --threads $nthreads
+                             --long_read_batch_size 500
+
+#----------------------------------------------------------------------#
+
+#----------------------------------------------------------------------#
+# LoRDEC (version 0.7)
+# http://www.atgc-montpellier.fr/lordec/
+
+kmerSize=21
+solid_th=2
+abundance_th=429496700
+
+lordec-correct -i $LR -2 $SR1 $SR2 -k $kmerSize -o $outfile -s $solid_th -a $abundance_th -T $nthreads
+
+#----------------------------------------------------------------------#
+
+#----------------------------------------------------------------------#
+# TALC (version 1.0)
+# https://gitlab.igh.cnrs.fr/lbroseus/TALC
+
+kmerSize=21
+
+jellyfish count --mer $kmerSize -s 100M -o $outmp.k$kmerSize.jf $SR1 $SR2
+jellyfish dump -c $outmp.k$kmerSize.jf > $SRdump
+rm $outmp.k$kmerSize.jf
+
+talc $LR --SR  $SRdump -k $kmerSize -o $outfile -qm memory -t $nthreads
+#----------------------------------------------------------------------#
+
+#####################################################################################################
+# Command lines and versions used for benchmarking the various correction methods
+# (1) Commands for running correction methods
+# (2) Commands for running aligners
+# Date: May-July 2019
+#####################################################################################################
+
+########################################################################
+# (2) Commands for running aligners
+########################################################################
+#Input data and common parameters
+
+LR="LR" #path to the long read data set
+
+reffasta=Homo_sapiens.GRCh38.dna.toplevel.fa
+gtf=Homo_sapiens.GRCh38.94.gtf
+outfile="out"
+
+num_threads=10
+
+#----------------------------------------------------------------------#
+# GMAP (gmap-2017-11-15)
+
+gmap_build -D $GMAPindex -d hg38 $reffasta
+gmap -d hg38 -D $GMAPindex -A $LR -f samse -n 0  -k 14 -t $num_threads -O > $outfile
+
+#----------------------------------------------------------------------#
+
+#----------------------------------------------------------------------#
+# Minimap2 (version 2.11-r797)
+
+minimap2 -I100g --cs -ax splice -k14 -uf --secondary=no $reffasta $LR > $outfile
+
+#----------------------------------------------------------------------#
+
+#----------------------------------------------------------------------#
+# GraphMap (version v0.5.2)
+
+graphmap align -r $reffasta -d $LR --gtf $gtf -o $outfile
+
+#----------------------------------------------------------------------#

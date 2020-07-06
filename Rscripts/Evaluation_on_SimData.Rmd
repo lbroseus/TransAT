@@ -1,0 +1,191 @@
+---
+title: "Evaluation on Simulated Data (Bulk RNA-seq)"
+author: "Lucile Broséus"
+date: "January 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+# R packages
+
+suppressPackageStartupMessages({
+  
+  library(GenomicRanges)
+  library(GenomicAlignments)
+  library(rtracklayer)
+  
+  library(dplyr)
+  library(stringr)
+  library(data.table)
+  
+  library(ggplot2)
+
+  library(gtools)
+  library(compositions)
+})
+
+source("utils.R")
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+# Needed information:
+
+# Splice-aware alignments:
+genomebamdir <- "/path/to/bamfiles"
+file_pattern <- ".sorted.bam$"
+
+# Description of nano-simulated reads (with columns read_name transcript_id gene_id):
+ground_truth_file <- "/path/to/simDescription.txt"
+
+# Folder containing Salmon output folders:
+salmon_folder <- "/path/to/salmon/folders"
+
+```
+
+# Primary alignments and sequence quality
+
+```{r, echo = FALSE, eval = TRUE}
+
+# Getting paths to bam files:
+
+bamfiles <- list.files(genomebamdir, full.names = T, pattern = ".bam$")
+methods <- basename(bamfiles) %>% str_remove(pattern = file_pattern)
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+# Compute base accuracy from primary alignments:
+
+summaries <- computeBaseAccuracy(genomebamdir, file_pattern = file_pattern)
+
+```
+
+# Gene and Transcript-level quantitation
+
+```{r, echo = FALSE, eval = TRUE}
+
+# Import ground truth data:
+
+ground_truth.df <- fread(ground_truth_file) %>% data.frame()
+totalRead <- nrow(ground_truth.df)
+
+ground_truth.df <- ground_truth.df %>%
+                   group_by(gene_id) %>% 
+                   mutate(NumReads.gene = n(), nbSisters = length(unique(transcript_id))) %>%
+                   group_by(transcript_id, gene_id, NumReads.gene, nbSisters) %>%
+                   summarize(NumReads.truth = n()) %>%
+                   data.frame()
+
+#major isoform ratio:
+ground_truth.df <- ground_truth.df %>%
+                   group_by(gene_id) %>% 
+                   mutate(major_ratio = getMajorProportion(NumReads.truth/NumReads.gene),
+                          major_count = max(as.numeric(NumReads.truth))) %>%
+                   data.frame()
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+# Import salmon data
+
+salmon_files <- list.files(salmon_folder, pattern = "quant.sf", full.names = T, recursive = T)
+samples <- basename(list.files(salmon_folder, full.names = F))
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+# Compute gene- and tx-level error summaries
+
+error_summaries <- matrix(nrow = length(samples)*2, ncol = 7) %>% data.frame()
+ard_summaries <- matrix(nrow = length(samples)*2, ncol = 7) %>% data.frame()
+
+error_tx.df <- data.frame()
+
+for(f in 1:length(samples)){
+  
+  df <- fread( salmon_files[f] ) %>% data.frame() %>% arrange(Name)
+  df <- df %>% mutate(Name = str_remove(string = Name, pattern = "\\..*"))
+  df <- merge(df, ground_truth.df, by.x = "Name", by.y = "transcript_id", all = T)
+  df <- df %>% arrange(Name)
+  
+  df$NumReads.truth[which(is.na(df$NumReads.truth))] <- 0
+  df$NumReads.gene[which(is.na(df$NumReads.gene))] <- 0
+  df$NumReads[which(is.na(df$NumReads))] <- 0
+  
+  df$gene_id[which(is.na(df$gene_id))] <- df$Name[which(is.na(df$gene_id))]
+  
+  #Feed tx count matrix
+  if( f == 1 ){
+    NumReads.tx <- matrix(nrow = nrow(df), ncol = length(samples)+1)
+    NumReads.tx[, 1] <- as.vector( df$NumReads.truth )
+  }
+  NumReads.tx[, f+1] <- df$NumReads
+  
+  #cat("Tx-level error calculation: \n")
+  df.tx <- df %>% filter(NumReads.truth+NumReads > 0) %>% 
+               mutate(error.NumReads = abs(NumReads.truth-NumReads), 
+               ard.NumReads = abs(NumReads.truth-NumReads)/(NumReads.truth+NumReads))
+  
+  error_tx.df <- rbind.data.frame(error_tx.df,
+                                  data.frame(transcript_id = df.tx$Name, 
+                                             gene_id = df.tx$gene_id,
+                                             sample = samples[f],
+                                             NumReads = df.tx$NumReads,
+                                             NumReads.truth = df.tx$NumReads.truth,
+                                             error_tx = df.tx$error.NumReads,
+                                             ard_tx = df.tx$ard.NumReads))
+  
+  error_summaries[2*f-1,] <- c(summary(df.tx$error.NumReads), 
+                                    sd = sd(df.tx$error.NumReads, na.rm = T)) 
+  ard_summaries[2*f-1,] <- c(summary(df.tx$ard.NumReads),  sd(df.tx$ard.NumReads, na.rm = T))
+
+  #cat("Gene-level error calculation: \n")
+  df <- df %>% group_by(gene_id) %>% summarise(NumReads.truth = sum(NumReads.truth), 
+                                               NumReads = sum(NumReads)) %>% 
+                                     mutate(error.NumReads=NumReads.truth-NumReads,
+                                               ard.NumReads=(NumReads.truth-NumReads)/(NumReads.truth+NumReads)) %>%
+                                     data.frame()
+  
+
+  error_summaries[2*f,] <- c(summary(df$error.NumReads), 
+                                    sd = sd(df$error.NumReads, na.rm = T)) 
+  ard_summaries[2*f,] <- c(summary(df$ard.NumReads),  sd(df$ard.NumReads, na.rm = T))
+    
+}
+
+colnames(error_summaries) <- c("Min.",  "1st Qu.", "Median", "Mean",  "3rd Qu.", "Max.", "sd")
+error_summaries <- cbind.data.frame(level = rep(c("tx", "gene"), length(samples)), 
+                                    error_summaries)
+error_summaries$sample <- ""
+error_summaries$sample[odd(1:nrow(error_summaries))] <- error_summaries$sample[even(1:nrow(error_summaries))] <- samples
+
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+cat("Absolute relative distances between gene counts: \n")
+
+print( ard_summaries.gene )
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+cat("Absolute relative distances between isoforms counts: \n")
+
+print( ard_summaries.tx )
+
+```
+
+

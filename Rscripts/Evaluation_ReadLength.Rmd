@@ -1,0 +1,106 @@
+---
+title: "Read length preservation"
+author: "Lucile Broséus"
+date: "February 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+# R packages
+
+suppressPackageStartupMessages({
+  
+  library(Biostrings)
+  library(dplyr)
+  library(stringr)
+  library(data.table)
+  library(ggplot2)
+  library(RColorBrewer)
+  library(gridExtra)
+  
+})
+
+```
+
+# Behaviour on real data
+
+```{r, echo = FALSE, eval = TRUE}
+
+fasta_folders <- c("../Data/ERCC/fasta/")
+
+experiments <- c("ERCC")
+
+```
+
+```{r, echo = FALSE, eval = TRUE, fig.align="center", fig.height=10, fig.width=14}
+
+plot.list <- list()
+dist_summary.list <- list()
+
+for( fo in 1:length(experiments) ){
+
+  fasta_files <- list.files(fasta_folders[fo], full.names = T)
+  raw_index <- grep(pattern = "raw", x = fasta_files)
+  samples <-  str_remove(list.files(fasta_folders[fo], full.names = F)[-raw_index], ".fa")
+  samples <- str_remove(str_extract(samples, pattern = "\\..*"), pattern = ".")
+
+  raw_seq <- readDNAStringSet(fasta_files[ raw_index ])
+  raw_seq <- data.frame(read_name = names(raw_seq), raw_read_length = width(raw_seq))
+  raw_seq$read_name <- tapply(as.character(raw_seq$read_name), 1:nrow(raw_seq),
+                                 function(x) str_split(string = x, pattern = " ")[[1]][1])
+  
+  distances.df <- data.frame()
+  dist_summary.list[[fo]] <- matrix(nrow = length(fasta_files)-1, ncol = 7)
+  
+  for(fi in 1:(length(fasta_files)-1) ){
+  
+    corr_seq <- readDNAStringSet(fasta_files[ setdiff(1:length(fasta_files), raw_index)[fi] ])
+    corr_seq <- data.frame(read_name = names(corr_seq), corr_read_length = width(corr_seq))
+    corr_seq$read_name <- tapply(as.character(corr_seq$read_name), 1:nrow(corr_seq),
+                                 function(x) str_trim( str_split(string = x, pattern = " ")[[1]][1] ))
+    
+    corr_seq <- merge(corr_seq, raw_seq, by = "read_name", all = T)
+  
+    corr_seq <- corr_seq %>% mutate(relative_dist = (corr_read_length-raw_read_length)/raw_read_length)
+  
+    distances.df <- rbind.data.frame(distances.df,
+                                     data.frame(experiment = experiments[fo],
+                                                sample = samples[fi], 
+                                                relative_dist = corr_seq$relative_dist))
+    
+    dist_summary.list[[fo]][fi, ] <- c(summary(abs(corr_seq$relative_dist*100))[1:6],
+                                       round(sd(abs(corr_seq$relative_dist*100)),3))
+
+
+  }
+  
+  plot.list[[fo]] <- ggplot(distances.df, aes(x = sample, y = relative_dist)) +
+                       geom_boxplot() + theme_minimal() + ylim(-1, 1.5) +
+                       ggtitle(label = paste("Real", experiments[fo])) + 
+                       ylab("Relative distance") + xlab("Correction method")
+  
+  dist_summary.list[[fo]] <- data.frame(method = samples, dist_summary.list[[fo]])
+  colnames(dist_summary.list[[fo]]) <- c("method", "Min.",  "1st Qu.", "Median", "Mean",  "3rd Qu.", "Max.", "sd")
+  
+}
+
+
+``` 
+
+```{r, echo = FALSE, eval = TRUE}
+
+for(fo in 1:length(experiments)) print( plot.list[[fo]] )
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+dist_summary.list
+
+```
+

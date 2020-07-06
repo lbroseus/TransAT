@@ -1,0 +1,297 @@
+---
+title: "Evaluation on MinION Spike-In data"
+author: "Lucile Broséus"
+date: "February 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+# R packages
+
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(GenomicAlignments)
+  library(dplyr)
+  library(stringr)
+  library(data.table)
+  library(gplots)
+  library(ggplot2)
+  library(compositions) 
+})
+
+source("../Rscripts/utils.R")
+
+```
+
+# ERCC Mix1 Spike-In data
+
+Reference data (sequences, transcript models and theoretical abundances were obtained from ThermoFisher website:   <https://www.thermofisher.com/search/results?query=ERCC92.gtf&focusarea=Rechercher>. 
+Raw short and long read datasets were taken from the benchmark study: <https://www.nature.com/articles/srep31602#citeas>. 
+
+```{r, echo = TRUE, eval = TRUE}
+
+#Reference data location:
+fasta_file <- "../Data/ERCC/References/ERCC92.fa"
+gtf_file <- "../Data/ERCC/References/ERCC92.gtf"
+expression_file <- "../Data/ERCC/References/ERCC.abundances.txt"
+
+```
+
+# 1: Base accuracy and error rates computed on primary alignments
+
+The base-level accuracy is estimated from primary genome alignments as:
+\[ \dfrac{nbrM+nbrI+nbrD−NM}{nbrM+nbrI+nbrD} \] 
+where nbrM, nbrI, and nbrD are the number of M, I, and D characters in the CIGAR string, respectively,
+and $NM$ is the edit distance as reported by the aligner.
+
+```{r, echo = TRUE, eval = TRUE}
+
+# Input bam files
+
+genomebamdir <- "/path/to/bamfiles"
+file_pattern <- ".sorted.bam$"
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+summaries <- computeBaseAccuracy(genomebamdir, file_pattern = file_pattern)
+
+```
+
+Here are the summaries of *base accuracies* of input primary alignments:
+
+```{r, echo = FALSE, eval = TRUE}
+
+#Summary of base accuracies on ERCC data:
+print( summaries[, c(1:8)] )
+
+```
+
+And the error rates:
+
+```{r, echo = FALSE, eval = TRUE}
+
+#Summary of error rates by type on ERCC data:
+print( summaries[, c(1, 10:12)] )
+
+```
+
+# 2: Transcript-level quantitation
+
+Note: ERCC92 Mix1 theoretical concentrations and were obtained from ThermoFisher website at:
+<https://www.thermofisher.com/order/catalog/product/4456739#/4456739> (file Control Analysis).  
+
+```{r, echo = FALSE, eval = TRUE}
+
+# Import theoretical Transcript abundances:
+expression_levels <- read.table(file = expression_file, sep = "\t", header = T)
+
+colnames(expression_levels)[c(4,5)] <- c("concentration.in.Mix.1", "concentration.in.Mix.2")
+
+expression_levels <- expression_levels %>% 
+                     dplyr::select(ERCC.ID, Mix1 = concentration.in.Mix.1, subgroup)
+
+nbRawReads <- 35032
+
+```
+
+## Salmon quasi-mapping approach
+
+We used Salmon in quasi-mapping mode as follows: 
+
+```{r, echo = TRUE, eval = FALSE}
+
+fastaFile="../Data/ERCC/References/ERCC92.fa"
+
+salmon index -t $fastaFile -i $index -k 23
+
+salmon quant -i $index -l A -r $longReads -p $nthreads  -o $out
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+salmon_folder <- "/path/to/salmon/folders"
+
+salmon_files <- list.files(salmon_folder, pattern = "quant.sf", full.names = T, recursive = T)
+samples <- list.files(salmon_folder, full.names = F) %>% str_remove(pattern = "ERCC.minion.")
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+totalMix <- sum(expression_levels$Mix1)
+expression_levels <- expression_levels %>% 
+                     group_by(subgroup) %>% 
+                     mutate(Mix1.prop = Mix1/totalMix,
+                            NumReads.exp = Mix1.prop*nbRawReads)
+
+expression_levels <- expression_levels %>%
+                     group_by(subgroup) %>% 
+                     mutate(subgroup_exp_prop = round(NumReads.exp/sum(NumReads.exp),4)) %>% 
+                     arrange(ERCC.ID) %>%
+                     data.frame()
+
+error_summaries <- matrix(nrow = length(samples), ncol = 7)
+rel_summaries <- matrix(nrow = length(samples), ncol = 7)
+
+for(f in 1:length(samples)){
+  
+  df <- fread(salmon_files[f]) %>% data.frame() %>% arrange(Name)
+  
+  df <- merge(df, expression_levels, by.x = "Name", by.y = "ERCC.ID")
+  
+  #cat("Error: \n")
+  df <- df %>% filter(NumReads.exp>0) %>% 
+               mutate(error = abs(NumReads.exp-NumReads), 
+               rel = abs(NumReads.exp-NumReads)/(NumReads.exp))
+  
+
+  error_summaries[f,] <- c(summary(df$error), sd(df$error)) 
+  rel_summaries[f,] <- c(summary(df$rel),  sd(df$rel))
+  
+}
+
+colnames(NumReads)[-1] <- samples
+
+error_summaries <- cbind.data.frame(samples, error_summaries)
+colnames(error_summaries) <- c("method", "Min.",  "1st Qu.", "Median", "Mean",  "3rd Qu.", "Max.", "sd")
+
+rel_summaries <- cbind.data.frame(samples, rel_summaries)
+colnames(rel_summaries) <- c("method", "Min.",  "1st Qu.", "Median", "Mean",  "3rd Qu.", "Max.", "sd")
+
+```
+
+```{r, echo = TRUE, eval = FALSE}
+
+print( error_summaries )
+
+```
+
+```{r, echo = TRUE, eval = FALSE}
+
+print( rel_summaries )
+
+```
+
+## Counts from alignments to the reference transcriptome (GraphMap)
+
+Long Read transcriptome alignments were obtained with GraphMap using the following command:
+
+```{r, echo = TRUE, eval = FALSE}
+
+fasta="../Data/ERCC/References/ERCC92.fa"
+gtf="../Data/ERCC/References/ERCC92.gtf"
+
+graphmap align -r $fasta \      #reference fasta file  
+               --gtf $gtf \  #reference gtf file
+               -d $LR       \      #file containing LR sequences
+               -o $sam             #output file
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+gtf_folder <- "path/to/graphmap/gtf"
+gtf_files <- list.files(gtf_folder, full.names = T, pattern = ".gtf")
+
+samples <- list.files(gtf_folder, full.names = F, pattern = ".gtf") %>% str_remove(pattern = ".gtf") 
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+par(mfrow = c(floor(length(gtf_files)/2),
+              ceiling(length(gtf_files)/2)))
+
+recoveredTx <- list()
+measurements <- data.frame()
+
+for(f in 1:length(gtf_files)){
+  
+  gtf <- rtracklayer::import( gtf_files[f] ) %>% data.frame()
+  gtf <- gtf %>% filter(type == "transcript")
+  
+  gtf <- merge(gtf, expression_levels, by.x = "seqnames", by.y = "ERCC.ID")
+  recoveredTx[[f]]<- gtf$seqnames  
+  
+  gtf$TPM <- as.numeric(gtf$TPM)
+  gtf$TPM[which(is.na(gtf$TPM))] <- 0
+  gtf$Mix1 <- as.vector(gtf$Mix1)
+
+  pearson <- cor(gtf$TPM, gtf$Mix1, method = "pearson") %>% round(digits = 3)
+  spearman <- cor(gtf$TPM, gtf$Mix1, method = "spearman" )%>% round(digits = 3)
+  
+  totalMix <- sum(gtf$Mix1)
+  gtf <- gtf %>% mutate(theoretical_count = Mix1/totalMix*nbRawReads,
+                        estimated_count = TPM/10^6*nbRawReads,
+                        error = theoretical_count-estimated_count,
+                        rel_error = (theoretical_count-estimated_count)/(theoretical_count))
+  
+  measurements <- rbind.data.frame(measurements,
+                                   data.frame(ERCC.ID = gtf$seqnames,
+                                              method = samples[f],
+                                              estimated_count = gtf$estimated_count,
+                                              theoretical_count = gtf$theoretical_count,
+                                              error = gtf$error,
+                                              rel_error = gtf$rel_error))
+  
+}
+
+
+```
+
+Using graphmap, identified ERCC transcripts are the same for all methods.  
+
+As the (low depth) MinION sequencing experiment likely missed the least expressed ERCC transcripts, quantitation errors are computed on this set of "identified" 50 transcripts.
+
+```{r, echo = FALSE, eval = TRUE}
+
+ggplot(data = measurements, aes(x = theoretical_count, y = estimated_count)) + 
+       geom_point() + geom_abline(slope = 1, intercept = 0, col = "red") +
+       scale_x_log10() + scale_y_log10() + 
+       facet_wrap(~method) + theme_minimal() +
+       xlab("Theoretical count") + ylab("Estimated count") + 
+       ggtitle("Theoretical versus estimated ERCC read counts")
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+ggplot(data = measurements, aes(x = theoretical_count, y = abs(rel_error) )) + 
+       geom_point() + 
+       scale_x_log10() + 
+       facet_wrap(~method) + theme_minimal() +
+       xlab("Theoretical count") + ylab("Absolute Relative Error (ARD)") + 
+       ggtitle("Theoretical count versus ARD")
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+#Relative error summary
+measurements %>% group_by(method) %>% summarise(Quant1 = quantile(abs(rel_error), 0.25),
+                                                Median = median(abs(rel_error)),
+                                                Mean = mean(abs(rel_error)),
+                                                Quant3 = quantile(abs(rel_error), 0.75),
+                                                sd = sd(abs(rel_error))) %>% data.frame()
+
+```
+
+```{r, echo = FALSE, eval = TRUE}
+
+#Abs error summary
+measurements %>% group_by(method) %>% summarise(Quant1 = quantile(abs(error), 0.25),
+                                                Median = median(abs(error)),
+                                                Mean = mean(abs(error)),
+                                                Quant3 = quantile(abs(error), 0.75),
+                                                sd = sd(abs(error))) %>% data.frame()
+
+```
+
